@@ -3,22 +3,48 @@ const axios = require("axios");
 const xml2js = require("xml2js");
 const fs = require("fs");
 const path = require("path");
+const { PDFDocument } = require('pdf-lib');
 
-const URL_GITBOOK = "https://docs.walken.io";
+const URL_GITBOOK = "https://renownedgames.gitbook.io/ai-tree";
 
 // Function to fetch the sitemap XML and parse it
 async function fetchSitemap(url) {
   try {
+    console.log('Fetching sitemap from:', url);
     const response = await axios.get(url);
-    const sitemapXML = response.data;
+    if (!response.data) {
+      throw new Error('No data received from sitemap URL');
+    }
 
-    // Parse the XML sitemap into JSON
-    const parsedSitemap = await xml2js.parseStringPromise(sitemapXML);
-    const urls = parsedSitemap.urlset.url;
+    console.log('Parsing XML response...');
+    const result = await xml2js.parseStringPromise(response.data);
+    console.log('Parsed XML structure:', JSON.stringify(result, null, 2));
 
-    return urls.map((url) => url.loc[0]); // Extract the 'loc' elements (URLs)
+    // Handle different possible XML structures
+    if (result && result.urlset && Array.isArray(result.urlset.url)) {
+      return result.urlset.url.map(urlData => {
+        if (!urlData || !urlData.loc || !urlData.loc[0]) {
+          console.warn('Skipping invalid URL entry:', urlData);
+          return null;
+        }
+        return urlData.loc[0];
+      }).filter(url => url !== null);
+    } else if (result && result.sitemapindex && Array.isArray(result.sitemapindex.sitemap)) {
+      // Handle sitemap index file
+      console.log('Found sitemap index, fetching first sitemap...');
+      const firstSitemap = result.sitemapindex.sitemap[0].loc[0];
+      return fetchSitemap(firstSitemap);
+    } else {
+      console.error('Unexpected XML structure:', result);
+      throw new Error('Invalid sitemap format - unexpected XML structure');
+    }
   } catch (error) {
-    console.error("Error fetching or parsing sitemap:", error);
+    console.error('Error fetching or parsing sitemap:', error.message);
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
+    throw error;
   }
 }
 
@@ -109,21 +135,47 @@ function categorizeUrl(url) {
   const category = parts[4]; // Assuming categories are the 5th part of the URL
   return category; // Return the category name (e.g., 'settings', 'android')
 }
-// function categorizeUrl(url) {
-//   const parts = url.split("/");
-//   const category = parts[4]; // Assuming categories are the 5th part of the URL
 
-//   return category; // Return the category name (e.g., 'settings', 'android')
-// }
+// Function to get site name from URL
+function getSiteName(url) {
+  const urlParts = url.split('/');
+  // Get the last non-empty part of the URL
+  return urlParts.filter(part => part).pop();
+}
+
+// Function to combine PDFs
+async function combinePDFs(pdfPaths, outputPath) {
+  try {
+    const mergedPdf = await PDFDocument.create();
+    
+    for (const pdfPath of pdfPaths) {
+      const pdfBytes = fs.readFileSync(pdfPath);
+      const pdf = await PDFDocument.load(pdfBytes);
+      const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+      copiedPages.forEach(page => mergedPdf.addPage(page));
+    }
+
+    const mergedPdfBytes = await mergedPdf.save();
+    fs.writeFileSync(outputPath, mergedPdfBytes);
+    console.log(`Combined PDF saved to: ${outputPath}`);
+  } catch (error) {
+    console.error('Error combining PDFs:', error);
+  }
+}
 
 // Main function to run the script
 async function run() {
-  const sitemapUrl = `${URL_GITBOOK}/sitemap.xml`; // Replace with the actual sitemap URL
-  const saveDir = "./pdfs"; // Directory where PDFs will be saved
+  const sitemapUrl = `${URL_GITBOOK}/sitemap.xml`;
+  const baseDir = "./pdfs";
+  const siteName = getSiteName(URL_GITBOOK);
+  const siteDir = path.join(baseDir, siteName);
 
-  // Create the output directory if it doesn't exist
-  if (!fs.existsSync(saveDir)) {
-    fs.mkdirSync(saveDir);
+  // Create base and site directories if they don't exist
+  if (!fs.existsSync(baseDir)) {
+    fs.mkdirSync(baseDir);
+  }
+  if (!fs.existsSync(siteDir)) {
+    fs.mkdirSync(siteDir);
   }
 
   // Fetch the sitemap URLs
@@ -132,33 +184,33 @@ async function run() {
 
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
+  const allPdfPaths = [];
 
   // Initialize the page counter
   let pageCounter = 1;
 
   // Loop through each URL in the sitemap
   for (const url of urls) {
-    // Determine the category based on the URL
     const category = categorizeUrl(url);
-    const categoryDir = path.join(saveDir, category);
+    const categoryDir = path.join(siteDir, category);
 
-    // Create a folder for the category if it doesn't exist
     if (!fs.existsSync(categoryDir)) {
       fs.mkdirSync(categoryDir, { recursive: true });
     }
 
-    // Generate a sequential filename for the PDF (page_1.pdf, page_2.pdf, ...)
-    const pdfFileName = `page_${pageCounter}.pdf`; // Use pageCounter for unique file names
+    const pdfFileName = `page_${pageCounter}.pdf`;
     const pdfPath = path.join(categoryDir, pdfFileName);
 
-    // Capture the full page as a PDF
     await takeFullPagePdf(page, url, pdfPath);
-
-    // Increment the page counter
+    allPdfPaths.push(pdfPath);
     pageCounter++;
   }
 
   await browser.close();
+
+  // Create combined PDF
+  const combinedPdfPath = path.join(siteDir, `${siteName}_combined.pdf`);
+  await combinePDFs(allPdfPaths, combinedPdfPath);
 }
 
 run().catch(console.error);
