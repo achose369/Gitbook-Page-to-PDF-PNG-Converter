@@ -31,6 +31,7 @@ another_menu/
 
 ```
 npm install
+npm install pdf-lib
 ```
 
 3. To generate PDFs, run:
